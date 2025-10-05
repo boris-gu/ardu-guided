@@ -198,7 +198,16 @@ int main(int argc, char *argv[]) {
         mavlink_msg_set_position_target_global_int_pack(this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg, 0, // time_boot_ms скорее всего можно оставить 0
                                                         drone_id, MAV_COMP_ID_AUTOPILOT1,
                                                         MAV_FRAME_GLOBAL, // Возможно другой фрейм
-                                                        0b110111111000,
+                                                        // Битовая маска для игнорирования всех команд, кроме позиции
+                                                        // 0b110111111000
+                                                        POSITION_TARGET_TYPEMASK_VX_IGNORE |
+                                                        POSITION_TARGET_TYPEMASK_VY_IGNORE | 
+                                                        POSITION_TARGET_TYPEMASK_VZ_IGNORE |
+                                                        POSITION_TARGET_TYPEMASK_AX_IGNORE |
+                                                        POSITION_TARGET_TYPEMASK_AY_IGNORE |
+                                                        POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+                                                        POSITION_TARGET_TYPEMASK_YAW_IGNORE |
+                                                        POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE,
                                                         target_lat,
                                                         target_lon,
                                                         target_alt,
