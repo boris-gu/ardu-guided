@@ -96,6 +96,7 @@ int main(int argc, char *argv[]) {
    */
   uint8_t drone_id = 0;
   uint8_t this_id = 254; // 255 - стандарт для наземных станций, мы будем использовать другой на всякий случай
+  mavlink_heartbeat_t drone_hbeat;
   mavlink_global_position_t drone_pose;
   mavlink_statustext_t drone_text;
   int32_t target_lat = 0; // degE7
@@ -113,11 +114,11 @@ int main(int argc, char *argv[]) {
   uint16_t tx_len = 0;
 
   // Отслеживание для отправки
-  bool drone_is_arm = false;
-  bool drone_is_guided = false;
-  ULONGLONG send_pos_period = 1000; // мс
-  ULONGLONG send_guided_delay = 5000;
-  ULONGLONG send_arm_time = 0;
+  bool drone_one_arm_check = false;
+  bool drone_one_guided_check = false;
+  ULONGLONG send_guided_period = 1000; // мс
+  ULONGLONG send_pos_period = 1000;
+  ULONGLONG send_guided_time_last = 0;
   ULONGLONG send_pos_time_last = 0;
   for (;;) {
     // ЧТЕНИЕ COM
@@ -127,21 +128,44 @@ int main(int argc, char *argv[]) {
         switch (rx_msg.msgid) {
           // Это сообщение отсылается каждую секунду. По нему очень удобно находить дрон
           case MAVLINK_MSG_ID_HEARTBEAT:
-            // пока не нашли дрон и если компонент, отправивший HEARTBEAT является автопилотом
-            if (!drone_id && rx_msg.compid == MAV_COMP_ID_AUTOPILOT1) {
-              drone_id = rx_msg.sysid; // Запоминаем id дрона
-              // Запрос сообщений
-              // По сути, это уже запись COM, но логично сделать здесь
-              mavlink_msg_command_long_pack(this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg,
-                                      drone_id, MAV_COMP_ID_AUTOPILOT1,
-                                      MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-                                      MAVLINK_MSG_ID_GLOBAL_POSITION_INT, // Что запрашиваем
-                                      500000, // Интервал в микросекундах
-                                      0, 0, 0, 0, 0);
-              tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
-              WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+            // Если компонент, отправивший HEARTBEAT является автопилотом
+            if (rx_msg.compid == MAV_COMP_ID_AUTOPILOT1) {
+              mavlink_heartbeat_t uncnown_hbeat;
+              mavlink_msg_heartbeat_decode (&rx_msg, &uncnown_hbeat);
+              // Если автопилот Ardupilot и тип дрона - мультиротор
+              if (uncnown_hbeat.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA &&
+                  (uncnown_hbeat.type == MAV_TYPE_QUADROTOR ||
+                   uncnown_hbeat.type == MAV_TYPE_HEXAROTOR ||
+                   uncnown_hbeat.type == MAV_TYPE_OCTOROTOR)) {
+                if (!drone_id) {
+                  drone_id = rx_msg.sysid; // Запоминаем id дрона
+                  // Запрос сообщений
+                  // По сути, это уже запись COM, но логично сделать здесь
+                  // TODO: Т.к. при плохой связи сообщение может потеряться, логично чделать проверку,
+                  //       Если передача GLOBAL_POSITION_INT не началась, то запросить сообщения повторно
+                  mavlink_msg_command_long_pack(this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg,
+                                                drone_id, MAV_COMP_ID_AUTOPILOT1, MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                                                MAVLINK_MSG_ID_GLOBAL_POSITION_INT,  // Что запрашиваем
+                                                1000000,  // Интервал в микросекундах
+                                                0, 0, 0, 0, 0);
+                  tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
+                  WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+                  printf("HEARTBEAT: New drone [id %d], saved\n", rx_msg.sysid);
+                } else if (rx_msg.sysid == drone_id) {
+                  drone_hbeat = uncnown_hbeat;
+                  // Проверка для перевода в режим Guided только один раз
+                  if (!drone_one_guided_check && drone_hbeat.custom_mode == COPTER_MODE_GUIDED) {
+                    drone_one_guided_check = true;
+                  }
+                  printf("HEARTBEAT [id %d]: Mode %d, arm: %s\n", rx_msg.sysid, drone_hbeat.custom_mode,
+                         (drone_hbeat.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) ? "arm" : "disarm");
+                } else {
+                  printf("HEARTBEAT: Unknown drone [id %d]\n", rx_msg.sysid);
+                }
+              }
+            } else {
+              printf("HEARTBEAT: Not Autopilot [id %d]\n", rx_msg.compid);
             }
-            // TODO: Определять прошивку -> тип беспилотника -> текущий полетный режим
             break;
           case MAVLINK_MSG_ID_GLOBAL_POSITION_INT:
             if (rx_msg.sysid == drone_id) {
@@ -156,65 +180,71 @@ int main(int argc, char *argv[]) {
               // FIXME: Криво, потому что строка может не оканчиваться нулем, а может быть поделена на куски. Нужна проверка
               //        А пока выводим только целые сообщения
               if (drone_text.id == 0) {
-                printf("TEXT: %s", drone_text.text);
+                printf("TEXT: %s\n", drone_text.text);
               }
             }
             break;
           default:
             break;
         }
-        printf("RECIEVE\n");
+        // printf("RECIEVE\n");
       }
     }
     // ЗАПИСЬ COM
     if (drone_id) {
       // 1. Армим дрон
-      if (!drone_is_arm) {
+      if (!drone_one_arm_check) {
         mavlink_msg_command_long_pack(this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg,
                                       drone_id, MAV_COMP_ID_AUTOPILOT1,
                                       MAV_CMD_COMPONENT_ARM_DISARM, 0,
                                       1, 0, 0, 0, 0, 0, 0); // 1 - ARM
         tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
         WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
-        send_arm_time = GetTickCount64();
-        drone_is_arm = true;
+        drone_one_arm_check = true;
+        printf("  SEND: Arm\n");
       }
 
-      // 2. Переводим в режим Guided через 5 секунд
-      if (drone_is_arm && (GetTickCount64() - send_arm_time) > send_guided_delay) {
+      // 2. Переводим в режим Guided
+      // if (drone_hbeat.base_mode & MAV_MODE_FLAG_SAFETY_ARMED && // Раскомментировать при реальных тестах
+      if (drone_one_arm_check &&
+          !drone_one_guided_check &&
+          drone_hbeat.custom_mode != COPTER_MODE_GUIDED &&
+          (GetTickCount64() - send_guided_time_last) > send_guided_period) {
         mavlink_msg_command_long_pack(this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg,
                                       drone_id, MAV_COMP_ID_AUTOPILOT1,
                                       MAV_CMD_DO_SET_MODE , 0,
-                                      MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, COPTER_MODE_GUIDED, 0, 0, 0, 0, 0);
+                                      MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, COPTER_MODE_GUIDED,
+                                      0, 0, 0, 0, 0);
         tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
         WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
-        drone_is_guided = true;
+        send_guided_time_last = GetTickCount64();
+        printf("  SEND: Set mode Guided\n");
       }
 
       // TODO: 3. Отправляем команду на вертикальный взлет. Отслеживаем что взлетел, и только после этого отсылаем координаты
 
       // 4. Отправляем координаты
-      if (drone_is_guided && (GetTickCount64() - send_pos_time_last) > send_pos_period) {
-        mavlink_msg_set_position_target_global_int_pack(this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg, 0, // time_boot_ms скорее всего можно оставить 0
-                                                        drone_id, MAV_COMP_ID_AUTOPILOT1,
-                                                        MAV_FRAME_GLOBAL, // Возможно другой фрейм
-                                                        // Битовая маска для игнорирования всех команд, кроме позиции
-                                                        // 0b110111111000
-                                                        POSITION_TARGET_TYPEMASK_VX_IGNORE |
-                                                        POSITION_TARGET_TYPEMASK_VY_IGNORE | 
-                                                        POSITION_TARGET_TYPEMASK_VZ_IGNORE |
-                                                        POSITION_TARGET_TYPEMASK_AX_IGNORE |
-                                                        POSITION_TARGET_TYPEMASK_AY_IGNORE |
-                                                        POSITION_TARGET_TYPEMASK_AZ_IGNORE |
-                                                        POSITION_TARGET_TYPEMASK_YAW_IGNORE |
-                                                        POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE,
-                                                        target_lat,
-                                                        target_lon,
-                                                        target_alt,
-                                                        0,0,0,0,0,0,0,0);
+      if (drone_hbeat.custom_mode == COPTER_MODE_GUIDED && (GetTickCount64() - send_pos_time_last) > send_pos_period) {
+        mavlink_msg_set_position_target_global_int_pack(
+            this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg,
+            0,  // time_boot_ms скорее всего можно оставить 0
+            drone_id, MAV_COMP_ID_AUTOPILOT1,
+            MAV_FRAME_GLOBAL,  // Возможно другой фрейм
+            // Битовая маска для игнорирования всех команд, кроме позиции
+            // 0b110111111000
+            POSITION_TARGET_TYPEMASK_VX_IGNORE |
+            POSITION_TARGET_TYPEMASK_VY_IGNORE |
+            POSITION_TARGET_TYPEMASK_VZ_IGNORE |
+            POSITION_TARGET_TYPEMASK_AX_IGNORE |
+            POSITION_TARGET_TYPEMASK_AY_IGNORE |
+            POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+            POSITION_TARGET_TYPEMASK_YAW_IGNORE |
+            POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE,
+            target_lat, target_lon, target_alt, 0, 0, 0, 0, 0, 0, 0, 0);
         tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
         WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
         send_pos_time_last = GetTickCount64();
+        printf ("  SEND: Pos global lat:%d, lon:%d, alt:%f\n", target_lat, target_lon, target_alt);
       }
     }
   }
