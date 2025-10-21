@@ -1,94 +1,160 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <winsock2.h>
 #include <windows.h>
 #include "mavlink/all/mavlink.h"
 
+#define SERVER_IP "127.0.0.1"
+#define SERVER_PORT 5762
 #define VALID_BAUDRATES_SIZE 15
+#define RX_BUFF_SIZE (MAVLINK_MAX_PACKET_LEN * 4)
 
-// Допустимые баудрейты прописаны в winbase.h через #define (например CBR_115200)
+// Допустимые бодрейты прописаны в winbase.h через #define (например CBR_115200)
 const int valid_baudrates[VALID_BAUDRATES_SIZE] = {110,   300,   600,    1200,   2400,
                                                    4800,  9600,  14400,  19200,  38400,
                                                    56000, 57600, 115200, 128000, 256000};
 
+typedef enum {
+  CONNECT_TCP,
+  CONNECT_UART
+} connection_t;
+
 int main(int argc, char *argv[]) {
+  connection_t con_type;
+  // tcp
+  WSADATA wsa;
+  struct sockaddr_in server;
+  SOCKET client_socket;
+  u_long non_blocking_mode = 1;
+  // uart
   HANDLE hSerial;
 
   /**
-   * НАСТРОЙКА COM ПОРТА
+   * НАСТРОЙКА ПОДКЛЮЧЕНИЯ
    */
-  // Разбираем аргументы main() 
-  if (argc != 3) {
-    printf("Invalid parameters\n");
-    printf("ardu-guided.exe [num of COM port] [baudrate]\n");
-    return 1;
-  }
-  int comport_num = atoi(argv[1]);
-  int baudrate = atoi(argv[2]);
-  if (comport_num <= 0) {
-    printf("Invalid num of COM port: %s\n", argv[1]);
-    printf("ardu-guided.exe [num of COM port] [baudrate]\n");
-    return 1;
-  }
-  boolean is_baudrate_valid = FALSE;
-  for (size_t i = 0; i < VALID_BAUDRATES_SIZE; i++) {
-    if (baudrate == valid_baudrates[i]) {
-      is_baudrate_valid = TRUE;
+  switch (argc) {
+    case 1: {
+      con_type = CONNECT_TCP;
+      printf("  TCP\n-------\n");
+      // Инициализация Winsock
+      if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("WSAStartup failed. Error: %d\n", WSAGetLastError());
+        return 1;
+      }
+      printf("WSAStartup OK\n");
+      
+      // Создание сокета
+      if ((client_socket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+        printf("Socket creation failed. Error: %d\n", WSAGetLastError());
+        WSACleanup();
+        return 1;
+      }
+      printf("Socket creation OK\n");
+
+      // Настройка адреса сервера
+      server.sin_family = AF_INET;
+      server.sin_addr.s_addr = inet_addr(SERVER_IP);
+      server.sin_port = htons(SERVER_PORT);
+      printf("Connecting to %s:%d...\n", SERVER_IP, SERVER_PORT);
+
+      // Подключение к серверу
+      if (connect(client_socket, (struct sockaddr*)&server, sizeof(server)) < 0) {
+        printf("Connection failed. Error: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+      }
+      printf("Connection OK\n");
+
+      // Установка неблокирующего режима
+      if (ioctlsocket(client_socket, FIONBIO, &non_blocking_mode) == SOCKET_ERROR) {
+        printf("Failed to set non-blocking mode. Error: %d\n", WSAGetLastError());
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+      }
+      printf("Non-blocking mode OK\n");
       break;
     }
-  }
-  if (!is_baudrate_valid) {
-    printf("Invalid baudrate: %s\n", argv[2]);
-    printf("ardu-guided.exe [num of COM port] [baudrate]\n");
-    return 1;
-  }
-  const size_t COMPORT_BUFF_SIZE = 15;
-  char comport_buff[COMPORT_BUFF_SIZE];
-  sprintf_s(comport_buff, COMPORT_BUFF_SIZE, "\\\\.\\COM%d", comport_num);
-  printf("C COM: %s\n", comport_buff);
-  printf("C baudrate: %s\n", argv[2]);
+    case 3: {
+      con_type = CONNECT_UART;
+      printf("  UART\n--------\n");
+      // Разбираем аргументы main()
+      int comport_num = atoi(argv[1]);
+      int baudrate = atoi(argv[2]);
+      if (comport_num <= 0) {
+        printf("Invalid num of COM port: %s\n", argv[1]);
+        printf("ardu-guided.exe [num of COM port] [baudrate]\n");
+        return 1;
+      }
+      boolean is_baudrate_valid = FALSE;
+      for (size_t i = 0; i < VALID_BAUDRATES_SIZE; i++) {
+        if (baudrate == valid_baudrates[i]) {
+          is_baudrate_valid = TRUE;
+          break;
+        }
+      }
+      if (!is_baudrate_valid) {
+        printf("Invalid baudrate: %s\n", argv[2]);
+        printf("ardu-guided.exe [num of COM port] [baudrate]\n");
+        return 1;
+      }
+      const size_t COMPORT_BUFF_SIZE = 15;
+      char comport_buff[COMPORT_BUFF_SIZE];
+      sprintf_s(comport_buff, COMPORT_BUFF_SIZE, "\\\\.\\COM%d", comport_num);
+      printf("C COM: %s\n", comport_buff);
+      printf("C baudrate: %s\n", argv[2]);
 
-  // Открываем COM порт
-  hSerial = CreateFile(comport_buff,GENERIC_READ | GENERIC_WRITE,
-                       0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-  if (hSerial == INVALID_HANDLE_VALUE) {
-    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
-      printf("%s does not exist\n", comport_buff);
-    } else {
-      printf ("Error %s opening\n", comport_buff);
+      // Открываем COM порт
+      hSerial = CreateFile(comport_buff,GENERIC_READ | GENERIC_WRITE,
+                          0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+      if (hSerial == INVALID_HANDLE_VALUE) {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+          printf("%s does not exist\n", comport_buff);
+        } else {
+          printf ("Error %s opening\n", comport_buff);
+        }
+        return 1;
+      }
+
+      // Настраиваем COM порт
+      DCB dcbSerialParams = {0};
+      dcbSerialParams.DCBlength = sizeof(dcbSerialParams);
+      if (!GetCommState(hSerial, &dcbSerialParams)) {
+        printf("Error getting COM port state\n");
+        CloseHandle(hSerial);
+        return 1;
+      }
+      dcbSerialParams.BaudRate = baudrate;
+      dcbSerialParams.ByteSize = 8;
+      dcbSerialParams.StopBits = ONESTOPBIT;
+      dcbSerialParams.Parity = NOPARITY;
+      if (!SetCommState(hSerial, &dcbSerialParams)) {
+        printf("Error setting %s state\n", comport_buff);
+        CloseHandle(hSerial);
+        return 1;
+      }
+
+      // Настраиваем таймауты
+      COMMTIMEOUTS timeouts={0};
+      timeouts.ReadIntervalTimeout = MAXDWORD;
+      timeouts.ReadTotalTimeoutConstant = 0;
+      timeouts.ReadTotalTimeoutMultiplier = 0;
+      timeouts.WriteTotalTimeoutConstant = 0;
+      timeouts.WriteTotalTimeoutMultiplier = 10;
+      if (!SetCommTimeouts(hSerial, &timeouts)) {
+        printf("Error setting %s timeouts\n", comport_buff);
+        CloseHandle(hSerial);
+        return 1;
+      }
+      break;
     }
-    return 1;
-  }
-
-  // Настраиваем COM порт
-  DCB dcbSerialParams = {0};
-  dcbSerialParams.DCBlength = sizeof(dcbSerialParams);
-  if (!GetCommState(hSerial, &dcbSerialParams)) {
-    printf("Error getting COM port state\n");
-    CloseHandle(hSerial);
-    return 1;
-  }
-  dcbSerialParams.BaudRate = baudrate;
-  dcbSerialParams.ByteSize = 8;
-  dcbSerialParams.StopBits = ONESTOPBIT;
-  dcbSerialParams.Parity = NOPARITY;
-  if (!SetCommState(hSerial, &dcbSerialParams)) {
-    printf("Error setting %s state\n", comport_buff);
-    CloseHandle(hSerial);
-    return 1;
-  }
-
-  // Настраиваем таймауты
-  COMMTIMEOUTS timeouts={0};
-  timeouts.ReadIntervalTimeout = MAXDWORD;
-  timeouts.ReadTotalTimeoutConstant = 0;
-  timeouts.ReadTotalTimeoutMultiplier = 0;
-  timeouts.WriteTotalTimeoutConstant = 0;
-  timeouts.WriteTotalTimeoutMultiplier = 10;
-  if (!SetCommTimeouts(hSerial, &timeouts)) {
-    printf("Error setting %s timeouts\n", comport_buff);
-    CloseHandle(hSerial);
-    return 1;
+    default:
+      printf("Invalid parameters\n");
+      printf("For TCP:\nardu-guided.exe\n");
+      printf("For UART:\nardu-guided.exe [num of COM port] [baudrate]\n");
+      return 1;
   }
 
   /**
@@ -99,12 +165,12 @@ int main(int argc, char *argv[]) {
   mavlink_heartbeat_t drone_hbeat;
   mavlink_global_position_t drone_pose;
   mavlink_statustext_t drone_text;
-  int32_t target_lat = 0; // degE7
-  int32_t target_lon = 0;
-  float target_alt = 0; // m
+  int32_t target_lat = 58.4363792; // degE7
+  int32_t target_lon = 30.9819603;
+  float target_alt = 500; // m
 
   // Прием/Отправка
-  uint8_t rx_byte;
+  uint8_t rx_buf [RX_BUFF_SIZE];
   DWORD rx_real_count = 0;
   mavlink_message_t rx_msg;
   mavlink_status_t rx_status;
@@ -121,27 +187,43 @@ int main(int argc, char *argv[]) {
   ULONGLONG send_guided_time_last = 0;
   ULONGLONG send_pos_time_last = 0;
   for (;;) {
-    // ЧТЕНИЕ COM
-    while (ReadFile(hSerial, &rx_byte, 1, &rx_real_count, NULL) && rx_real_count == 1) {
+    // ЧТЕНИЕ
+    if (con_type == CONNECT_TCP) {
+      rx_real_count = recv(client_socket, rx_buf, RX_BUFF_SIZE - 1, 0);
+      if (rx_real_count == SOCKET_ERROR) {
+        rx_real_count = 0;
+        int rx_error = WSAGetLastError();
+        if (rx_error != WSAEWOULDBLOCK) {
+          printf("Connection failed. Error: %d\n",rx_error);
+        }
+      } else if (rx_real_count == 0) {
+        printf("Connection closed by server\n");
+        break;
+      }
+    } else {
+      ReadFile(hSerial, rx_buf, RX_BUFF_SIZE, &rx_real_count, NULL);
+    }
+    for (int i = 0; i < rx_real_count; i++) {
+      
       // Функция mavlink_parse_char пытается собрать пакет по одному байту, используя свой внутренний буфер
-      if (mavlink_parse_char(0, rx_byte, &rx_msg, &rx_status)) {
+      if (mavlink_parse_char(0, rx_buf[i], &rx_msg, &rx_status)) {
         switch (rx_msg.msgid) {
           // Это сообщение отсылается каждую секунду. По нему очень удобно находить дрон
           case MAVLINK_MSG_ID_HEARTBEAT:
             // Если компонент, отправивший HEARTBEAT является автопилотом
             if (rx_msg.compid == MAV_COMP_ID_AUTOPILOT1) {
-              mavlink_heartbeat_t uncnown_hbeat;
-              mavlink_msg_heartbeat_decode (&rx_msg, &uncnown_hbeat);
+              mavlink_heartbeat_t unknown_hbeat;
+              mavlink_msg_heartbeat_decode (&rx_msg, &unknown_hbeat);
               // Если автопилот Ardupilot и тип дрона - мультиротор
-              if (uncnown_hbeat.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA &&
-                  (uncnown_hbeat.type == MAV_TYPE_QUADROTOR ||
-                   uncnown_hbeat.type == MAV_TYPE_HEXAROTOR ||
-                   uncnown_hbeat.type == MAV_TYPE_OCTOROTOR)) {
+              if (unknown_hbeat.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA &&
+                  (unknown_hbeat.type == MAV_TYPE_QUADROTOR ||
+                   unknown_hbeat.type == MAV_TYPE_HEXAROTOR ||
+                   unknown_hbeat.type == MAV_TYPE_OCTOROTOR)) {
                 if (!drone_id) {
                   drone_id = rx_msg.sysid; // Запоминаем id дрона
                   // Запрос сообщений
                   // По сути, это уже запись COM, но логично сделать здесь
-                  // TODO: Т.к. при плохой связи сообщение может потеряться, логично чделать проверку,
+                  // TODO: Т.к. при плохой связи сообщение может потеряться, логично сделать проверку,
                   //       Если передача GLOBAL_POSITION_INT не началась, то запросить сообщения повторно
                   mavlink_msg_command_long_pack(this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg,
                                                 drone_id, MAV_COMP_ID_AUTOPILOT1, MAV_CMD_SET_MESSAGE_INTERVAL, 0,
@@ -149,10 +231,16 @@ int main(int argc, char *argv[]) {
                                                 1000000,  // Интервал в микросекундах
                                                 0, 0, 0, 0, 0);
                   tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
-                  WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+                  if (con_type == CONNECT_TCP) {
+                    if (send(client_socket, tx_buf, tx_len, 0) == SOCKET_ERROR) {
+                      printf("Send Req MAVLINK_MSG_ID_GLOBAL_POSITION_INT failed. Error: %d\n", WSAGetLastError());
+                    }
+                  } else {
+                    WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+                  }
                   printf("HEARTBEAT: New drone [id %d], saved\n", rx_msg.sysid);
                 } else if (rx_msg.sysid == drone_id) {
-                  drone_hbeat = uncnown_hbeat;
+                  drone_hbeat = unknown_hbeat;
                   // Проверка для перевода в режим Guided только один раз
                   if (!drone_one_guided_check && drone_hbeat.custom_mode == COPTER_MODE_GUIDED) {
                     drone_one_guided_check = true;
@@ -187,10 +275,9 @@ int main(int argc, char *argv[]) {
           default:
             break;
         }
-        // printf("RECIEVE\n");
       }
     }
-    // ЗАПИСЬ COM
+    // ЗАПИСЬ
     if (drone_id) {
       // 1. Армим дрон
       if (!drone_one_arm_check) {
@@ -199,7 +286,13 @@ int main(int argc, char *argv[]) {
                                       MAV_CMD_COMPONENT_ARM_DISARM, 0,
                                       1, 0, 0, 0, 0, 0, 0); // 1 - ARM
         tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
-        WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+        if (con_type == CONNECT_TCP) {
+          if (send(client_socket, tx_buf, tx_len, 0) == SOCKET_ERROR) {
+            printf("Send Req MAVLINK_MSG_ID_GLOBAL_POSITION_INT failed. Error: %d\n", WSAGetLastError());
+          }
+        } else {
+          WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+        }
         drone_one_arm_check = true;
         printf("  SEND: Arm\n");
       }
@@ -216,7 +309,13 @@ int main(int argc, char *argv[]) {
                                       MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, COPTER_MODE_GUIDED,
                                       0, 0, 0, 0, 0);
         tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
-        WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+        if (con_type == CONNECT_TCP) {
+          if (send(client_socket, tx_buf, tx_len, 0) == SOCKET_ERROR) {
+            printf("Send Req MAVLINK_MSG_ID_GLOBAL_POSITION_INT failed. Error: %d\n", WSAGetLastError());
+          }
+        } else {
+          WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+        }
         send_guided_time_last = GetTickCount64();
         printf("  SEND: Set mode Guided\n");
       }
@@ -242,13 +341,21 @@ int main(int argc, char *argv[]) {
             POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE,
             target_lat, target_lon, target_alt, 0, 0, 0, 0, 0, 0, 0, 0);
         tx_len = mavlink_msg_to_send_buffer(tx_buf, &tx_msg);
-        WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+        if (con_type == CONNECT_TCP) {
+          if (send(client_socket, tx_buf, tx_len, 0) == SOCKET_ERROR) {
+            printf("Send Req MAVLINK_MSG_ID_GLOBAL_POSITION_INT failed. Error: %d\n", WSAGetLastError());
+          }
+        } else {
+          WriteFile(hSerial, tx_buf, tx_len, NULL, NULL);
+        }
         send_pos_time_last = GetTickCount64();
         printf ("  SEND: Pos global lat:%d, lon:%d, alt:%f\n", target_lat, target_lon, target_alt);
       }
     }
   }
 
-  CloseHandle(hSerial);
+  if (con_type == CONNECT_UART) {
+    CloseHandle(hSerial);
+  }
   return 0;
 }
