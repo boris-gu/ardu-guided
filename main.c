@@ -10,7 +10,7 @@
 #define SERVER_PORT 5762
 #define VALID_BAUDRATES_SIZE 15
 #define RX_BUFF_SIZE (MAVLINK_MAX_PACKET_LEN * 4)
-#define TAKEOFF_ALT 2
+#define TAKEOFF_ALT 3
 #define TAKEOFF_ALT_DELTA 0.5
 
 typedef enum {
@@ -56,9 +56,9 @@ uint8_t this_id = 254; // 255 - стандарт для наземных ста�
 mavlink_heartbeat_t drone_hbeat = {};
 mavlink_global_position_int_t drone_pose = {};
 mavlink_statustext_t drone_text = {};
-int32_t target_lat = 58.4363792; // degE7
-int32_t target_lon = 30.9819603;
-float target_alt = 500; // m
+int32_t target_lat = 584363792; // degE7
+int32_t target_lon = 309819603;
+float target_alt = 15; // m
 
 // Прием/Отправка
 uint8_t rx_buf [RX_BUFF_SIZE];
@@ -153,8 +153,8 @@ int main(int argc, char *argv[]) {
       printf("C baudrate: %s\n", argv[2]);
 
       // Открываем COM порт
-      hSerial = CreateFile(comport_buff,GENERIC_READ | GENERIC_WRITE,
-                          0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+      hSerial = CreateFile(comport_buff, GENERIC_READ | GENERIC_WRITE, 0, 0,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
       if (hSerial == INVALID_HANDLE_VALUE) {
         if (GetLastError() == ERROR_FILE_NOT_FOUND) {
           printf("%s does not exist\n", comport_buff);
@@ -319,7 +319,7 @@ void* mavlink_rx_thread(void* arg) {
             if (rx_msg.sysid == drone_id) {
               mavlink_msg_global_position_int_decode(&rx_msg, &drone_pose);
               // Внимательнее с высотой, тут есть от точки запуска и от WGS84
-              printf("POSITION lat:%d, lon:%d, alt:%d\n", drone_pose.lat, drone_pose.lon, drone_pose.relative_alt);
+              printf("POSITION lat:%d, lon:%d, alt:%f\n", drone_pose.lat, drone_pose.lon, drone_pose.relative_alt / 1000.);
             }
             break;
           case MAVLINK_MSG_ID_STATUSTEXT:
@@ -425,12 +425,12 @@ void* mavlink_tx_thread(void* arg) {
         }
         // 5. Отправляем координаты
         case TASK_FLY_TO_COORD: {
-          printf ("  SEND: Pos global lat:%d, lon:%d, alt:%f\n", target_lat, target_lon, target_alt / 1000.);
+          printf ("  SEND: Pos global lat:%d, lon:%d, alt:%f\n", target_lat, target_lon, target_alt);
           mavlink_msg_set_position_target_global_int_pack(
             this_id, MAV_COMP_ID_MISSIONPLANNER, &tx_msg,
             0,  // time_boot_ms скорее всего можно оставить 0
             drone_id, MAV_COMP_ID_AUTOPILOT1,
-            MAV_FRAME_GLOBAL,  // Возможно другой фрейм
+            MAV_FRAME_GLOBAL_RELATIVE_ALT,  // Возможно другой фрейм
             // Битовая маска для игнорирования всех команд, кроме позиции
             // 0b110111111000
             POSITION_TARGET_TYPEMASK_VX_IGNORE |
